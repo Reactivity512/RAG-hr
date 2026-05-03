@@ -1,0 +1,51 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant-hr
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__LOG_LEVEL=INFO
+    networks:
+      - ml-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build: ./api
+    container_name: rag-api-hr
+    ports:
+      - "8000:8000"
+    environment:
+      QDRANT_HOST: qdrant
+      OLLAMA_HOST: http://host.docker.internal:11434
+      OLLAMA_MODEL: llama3
+    networks:
+      - ml-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  parser:
+    build: ./parser
+    container_name: rag-parser-hr
+    environment:
+      QDRANT_HOST: qdrant
+    networks:
+      - ml-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./resumes:/app/resumes 
+    profiles: ["manual"]  
+
+networks:
+  ml-net:
+    driver: bridge

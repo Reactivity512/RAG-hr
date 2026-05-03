@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Resume Search (RAG)</title>
+    <!-- Подключаем красивый шрифт -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Библиотека для рендеринга Markdown от LLM -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    
+    <style>
+        :root {
+            --bg-color: #f7f8fa;
+            --container-bg: #ffffff;
+            --primary-color: #4f46e5;
+            --primary-hover: #4338ca;
+            --text-main: #1a1a1a;
+            --text-muted: #6b7280;
+            --border-color: #e5e7eb;
+            --user-bubble: #4f46e5;
+            --ai-bubble: #ffffff;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            display: flex;
+            justify-content: center;
+            padding: 2rem 1rem;
+            min-height: 100vh;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+            background: var(--container-bg);
+            border-radius: 16px;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.05);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            height: 90vh; /* Фиксированная высота как у чата */
+        }
+
+        /* Header */
+        header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: var(--primary-color);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 700;
+            font-size: 1.2rem;
+        }
+
+        header h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        header p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        /* Chat Area */
+        .chat-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .message {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .message-label {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+
+        .message-content {
+            padding: 1rem 1.25rem;
+            border-radius: 12px;
+            line-height: 1.6;
+            font-size: 0.95rem;
+        }
+
+        .message.user .message-content {
+            background: var(--user-bubble);
+            color: white;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.ai .message-content {
+            background: var(--bg-color);
+            color: var(--text-main);
+            border: 1px solid var(--border-color);
+            border-bottom-left-radius: 4px;
+        }
+
+        /* Стили для отрендеренного Markdown внутри ответа ИИ */
+        .message.ai .message-content h1, .message.ai .message-content h2, .message.ai .message-content h3 {
+            margin-top: 1rem;
+            margin-bottom: 0.5rem;
+            color: var(--primary-color);
+        }
+        .message.ai .message-content ul, .message.ai .message-content ol {
+            margin-left: 1.5rem;
+            margin-top: 0.5rem;
+        }
+        .message.ai .message-content p {
+            margin-bottom: 0.5rem;
+        }
+        .message.ai .message-content strong {
+            color: var(--text-main);
+        }
+
+        /* Input Area */
+        .input-area {
+            padding: 1.5rem;
+            border-top: 1px solid var(--border-color);
+            background: #fff;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1rem;
+            transition: border-color 0.2s;
+        }
+
+        .input-group:focus-within {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+        }
+
+        textarea {
+            width: 100%;
+            border: none;
+            background: transparent;
+            resize: none;
+            font-size: 0.95rem;
+            outline: none;
+            font-family: inherit;
+            min-height: 60px;
+            color: var(--text-main);
+        }
+
+        .bottom-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+
+        .skills-input {
+            flex: 1;
+            border: none;
+            background: white;
+            padding: 0.5rem 0.75rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            outline: none;
+            color: var(--text-main);
+        }
+        
+        .skills-input::placeholder {
+            color: #9ca3af;
+        }
+
+        button {
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 0.6rem 1.2rem;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.9rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: background 0.2s;
+            white-space: nowrap;
+        }
+
+        button:hover:not(:disabled) {
+            background: var(--primary-hover);
+        }
+
+        button:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
+        /* Loading Spinner */
+        .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s ease-in-out infinite;
+            display: none;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .empty-state {
+            text-align: center;
+            color: var(--text-muted);
+            margin-top: 40%;
+        }
+        
+        .empty-state h2 {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+            color: var(--text-main);
+        }
+
+        /* Скроллбар */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <div class="logo-icon">HR</div>
+            <div>
+                <h1>AI Рекрутер</h1>
+                <p>Гибридный поиск по базе резюме (Dense + Sparse + LLM)</p>
+            </div>
+        </header>
+
+        <div class="chat-area" id="chatArea">
+            <div class="empty-state" id="emptyState">
+                <h2>Поиск кандидатов</h2>
+                <p>Опишите идеального сотрудника на естественном языке.<br>Например: "Нужен Java разработчик со стажем от 3 лет, знавший Spring Boot"</p>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <div class="input-group">
+                <textarea id="queryInput" placeholder="Опишите требования к кандидату..." rows="2"></textarea>
+                <div class="bottom-row">
+                    <input type="text" class="skills-input" id="skillsInput" placeholder="Жесткий фильтр навыков (через запятую, напр: Git, Java)">
+                    <button id="sendBtn">
+                        <div class="spinner" id="spinner"></div>
+                        <span id="btnText">Найти</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const queryInput = document.getElementById('queryInput');
+        const skillsInput = document.getElementById('skillsInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const spinner = document.getElementById('spinner');
+        const btnText = document.getElementById('btnText');
+        const chatArea = document.getElementById('chatArea');
+        const emptyState = document.getElementById('emptyState');
+
+        const API_URL = 'http://localhost:8000/search';
+
+        // Настройка Marked.js
+        marked.setOptions({
+            breaks: true,
+            gfm: true
+        });
+
+        // Отправка по Ctrl+Enter
+        queryInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && e.ctrlKey) {
+                handleSearch();
+            }
+        });
+
+        sendBtn.addEventListener('click', handleSearch);
+
+        function setLoading(isLoading) {
+            sendBtn.disabled = isLoading;
+            spinner.style.display = isLoading ? 'block' : 'none';
+            btnText.innerText = isLoading ? 'Ищу...' : 'Найти';
+        }
+
+        function appendMessage(role, content) {
+            if (emptyState) emptyState.style.display = 'none';
+
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${role}`;
+
+            const label = document.createElement('div');
+            label.className = 'message-label';
+            label.innerText = role === 'user' ? 'Ваш запрос' : 'AI Ассистент';
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            
+            if (role === 'ai') {
+                contentDiv.innerHTML = marked.parse(content);
+            } else {
+                contentDiv.innerText = content;
+            }
+
+            msgDiv.appendChild(label);
+            msgDiv.appendChild(contentDiv);
+            chatArea.appendChild(msgDiv);
+            chatArea.scrollTop = chatArea.scrollHeight;
+
+            return contentDiv; // Возвращаем блок контента для обновления при стриминге (если понадобится)
+        }
+
+        async function handleSearch() {
+            const query = queryInput.value.trim();
+            if (!query) return;
+
+            // Парсим навыки
+            const skillsRaw = skillsInput.value.trim();
+            const skills = skillsRaw ? skillsRaw.split(',').map(s => s.trim()).filter(s => s) : [];
+
+            // Очищаем поля
+            queryInput.value = '';
+            skillsInput.value = '';
+            
+            // Показываем сообщение пользователя
+            let displayQuery = query;
+            if (skills.length > 0) {
+                displayQuery += `\n\n[Обязательные навыки фильтра: ${skills.join(', ')}]`;
+            }
+            appendMessage('user', displayQuery);
+
+            // Показываем плашку загрузки ИИ
+            const aiContentBlock = appendMessage('ai', 'Анализирую базу резюме с помощью гибридного поиска...');
+            setLoading(true);
+
+            try {
+                // Формируем тело запроса динамически
+                let bodyData = {
+                    query: query,
+                    top_k: 5
+                };
+
+                // Добавляем навыки только если они есть
+                if (skills.length > 0) {
+                    bodyData.required_skills = skills;
+                }
+
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(bodyData)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Ошибка сервера: ${response.status}`);
+                }
+
+                const data = await response.json();
+                
+                // Обновляем блок ИИ реальным ответом
+                let finalAnswer = data.answer;
+                if (data.found_resumes_count > 0) {
+                    finalAnswer += `\n\n*Найдено и проанализировано кандидатов: ${data.found_resumes_count}*`;
+                } else {
+                    finalAnswer = "Кандидаты по заданным критериям не найдены.";
+                }
+
+                aiContentBlock.innerHTML = marked.parse(finalAnswer);
+
+            } catch (error) {
+                aiContentBlock.innerHTML = `<span style="color: #ef4444;">Ошибка при обращении к серверу. Убедитесь, что API запущено (localhost:8000) и добавлен CORS в FastAPI.<br><br>${error.message}</span>`;
+            } finally {
+                setLoading(false);
+            }
+        }
+    </script>
+</body>
+</html>
