@@ -1,127 +1,79 @@
+"""
+CLI для полной переиндексации всех резюме из RESUMES_DIR.
+
+Запуск:
+    docker compose --profile manual up parser-cli
+    # или локально: python parser_and_index.py
+
+Логика:
+    1. Пересоздаём коллекцию Qdrant (drop + create) — чтобы не было дублей.
+    2. Читаем все .txt в RESUMES_DIR.
+    3. Для каждого: парсинг → валидация → эмбеддинг → upsert.
+    4. Печатаем summary. Exit code 0 если всё ок, 2 если были ошибки.
+
+НЕ пишет статусы в Redis — это offline-инструмент, не связан с UI.
+"""
+
 import os
-import re
-import uuid
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, TextIndexParams, TokenizerType
-from sentence_transformers import SentenceTransformer
+import sys
 
-# --- КОНФИГУРАЦИЯ ---
-RESUMES_DIR = os.getenv("RESUMES_DIR", "./resumes") # Папка с txt файлами
-QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost") # По умолчанию localhost, но в докере подставится 'qdrant'
-QDRANT_URL = f"http://{QDRANT_HOST}:6333"           # Формируем URL динамически
-COLLECTION_NAME = "resumes"
-EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-large"
-VECTOR_SIZE = 1024     # Размерность для multilingual-e5-large
+from common.indexing import ResumeValidationError, process_resume_to_item
+from common.qdrant_ops import recreate_collection, upsert_batch
 
-def parse_resume_txt(text: str, file_name: str) -> dict:
-    """
-    Парсит TXT резюме по заданному шаблону и извлекает структурированные данные.
-    """
-    payload = {
-        "file_name": file_name,
-        "title": None,
-        "salary": None,
-        "format": None,
-        "contacts": None,
-        "experience_text": None,
-        "skills_list": [],           # Список для фильтрации в Qdrant
-        "education": None,
-        "about": None,
-        "full_text": text            # Полный текст для генерации ответа LLM
-    }
 
-    # Регулярки для извлечения секций (re.DOTALL чтобы "." захватывал переносы строк)
-    patterns = {
-        "title": r"Название специальности:\s*(.*?)\n\n",
-        "salary": r"Заработная плата:\s*(.*?)\n\n",
-        "format": r"Формат работы:\s*(.*?)\n\n",
-        "contacts": r"Контакты:\s*(.*?)\n\n",
-        "experience_text": r"Опыт работы:\s*(.*?)\n\nНавыки:",
-        "education": r"Образование:\s*(.*?)\n\n",
-        "about": r"Об себе:\s*(.*)"
-    }
+RESUMES_DIR = os.getenv("RESUMES_DIR", "./resumes")
 
-    for key, pattern in patterns.items():
-        match = re.search(pattern, text, re.DOTALL)
-        if match:
-            payload[key] = match.group(1).strip()
 
-    # Специальная обработка навыков: вытащить чистые названия без уровня в скобках
-    skills_match = re.search(r"Навыки:\s*(.*?)\n\nОбразование:", text, re.DOTALL)
-    if skills_match:
-        raw_skills = skills_match.group(1).strip().split('\n')
-        # Берем только название навыка до открывающей скобки, если она есть
-        clean_skills = [re.sub(r'\s*\(.*?\)', '', skill).strip() for skill in raw_skills if skill.strip()]
-        payload["skills_list"] = clean_skills
+def main() -> int:
+    print(f"[cli] Полная переиндексация из: {RESUMES_DIR}")
 
-    return payload
+    if not os.path.isdir(RESUMES_DIR):
+        print(f"[cli] ОШИБКА: папка не найдена: {RESUMES_DIR}")
+        return 1
 
-def main():
-    print(f"Загрузка модели эмбеддингов: {EMBEDDING_MODEL_NAME}...")
-    # Модель скачается при первом запуске (около 2.2 ГБ)
-    encoder = SentenceTransformer(EMBEDDING_MODEL_NAME)
-
-    print(f"Подключение к Qdrant: {QDRANT_URL}...")
-    client = QdrantClient(url=QDRANT_URL)
-
-    # Создаем коллекцию, если ее нет
-    if not client.collection_exists(COLLECTION_NAME):
-        client.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
-        )
-
-        # Включаем полнотекстовый поиск (Sparse/BM25) по полю full_text
-        client.create_payload_index(
-            collection_name=COLLECTION_NAME,
-            field_name="full_text",
-            index_params=TextIndexParams(
-                type="text",
-                tokenizer=TokenizerType.WORD # Указываем токенизатор по словам (для русского и английского)
-            )
-        )
-        print(f"Коллекция '{COLLECTION_NAME}' успешно создана.")
-    else:
-        print(f"Коллекция '{COLLECTION_NAME}' уже существует.")
-
-    # Собираем все файлы
-    txt_files = [f for f in os.listdir(RESUMES_DIR) if f.endswith('.txt')]
+    txt_files = sorted(f for f in os.listdir(RESUMES_DIR) if f.endswith(".txt"))
     if not txt_files:
-        print(f"В папке {RESUMES_DIR} не найдено .txt файлов.")
-        return
+        print("[cli] В папке нет .txt файлов — нечего индексировать.")
+        return 0
 
-    points_to_upload = []
+    print(f"[cli] Найдено файлов: {len(txt_files)}")
+    print("[cli] Пересоздаю коллекцию Qdrant (drop + create)...")
+    recreate_collection()
 
-    print(f"Найдено файлов: {len(txt_files)}. Начинаю парсинг и векторизацию...")
+    ok = 0
+    failed: list[tuple[str, str]] = []
 
-    for file_name in txt_files:
+    items = []
+    for i, file_name in enumerate(txt_files, 1):
         file_path = os.path.join(RESUMES_DIR, file_name)
-        
-        with open(file_path, 'r', encoding='utf-8') as f:
-            text = f.read()
+        print(f"[cli] [{i}/{len(txt_files)}] {file_name}")
+        try:
+            item = process_resume_to_item(file_path, file_name)
+            items.append(item)
+            ok += 1
+            print(f"[cli]   OK → {item[0]}")
+        except ResumeValidationError as e:
+            print(f"[cli]   SKIP (валидация): {e}")
+            failed.append((file_name, str(e)))
+        except Exception as e:
+            print(f"[cli]   FAIL: {type(e).__name__}: {e}")
+            failed.append((file_name, f"{type(e).__name__}: {e}"))
 
-        # 1. Парсим текст
-        payload = parse_resume_txt(text, file_name)
+    # Батчевая загрузка в Qdrant одним вызовом
+    if items:
+        print(f"[cli] Загружаю {len(items)} точек в Qdrant...")
+        upsert_batch(items)
 
-        # 2. Создаем эмбеддинг (ВАЖНО: для e5 добавляем префикс "passage: ")
-        text_to_embed = f"passage: {payload['full_text']}"
-        vector = encoder.encode(text_to_embed).tolist()
+    print()
+    print(f"[cli] ──────────────────────────────────────────")
+    print(f"[cli] Итог: успешно {ok}, ошибок {len(failed)}")
+    if failed:
+        print("[cli] Проблемные файлы:")
+        for name, err in failed:
+            print(f"[cli]   • {name}: {err}")
 
-        # 3. Формируем точку для Qdrant
-        point = PointStruct(
-            id=str(uuid.uuid4()), # Уникальный ID
-            vector=vector,
-            payload=payload
-        )
-        points_to_upload.append(point)
+    return 0 if not failed else 2
 
-    # 4. Пакетная загрузка в Qdrant (намного быстрее чем по одной)
-    client.upsert(
-        collection_name=COLLECTION_NAME,
-        points=points_to_upload
-    )
-
-    print(f"Успешно проиндексировано {len(points_to_upload)} резюме в Qdrant!")
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

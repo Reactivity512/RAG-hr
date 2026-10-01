@@ -1,5 +1,9 @@
 fastapi
 uvicorn
+python-multipart
 qdrant-client
 sentence-transformers
-ollama
+openai
+celery
+redis
+pydantic>=2.0

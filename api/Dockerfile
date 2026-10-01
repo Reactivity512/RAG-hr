@@ -7,23 +7,29 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Установка Python-зависимостей (слой кэшируется, если requirements не менялся)
-COPY requirements.txt .
+# Зависимости API
+COPY api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копирование кода
-COPY main.py .
-COPY static/index.html static/index.html
+# Предзагрузка модели BGE-M3 (нужна для embed_query в /search)
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3')"
 
-# Создаём непривилегированного пользователя (security best practice)
+# Общий пакет
+COPY common/ ./common/
+
+# Код API
+COPY api/main.py .
+COPY api/celery_client.py .
+COPY api/static/ ./static/
+COPY api/schemas.py .
+COPY api/routes/ ./routes/
+
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE ${PORT}
 
-# Healthcheck для оркестраторов (K8s, Docker Compose, Traefik и т.д.)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT}/health')" || exit 1
 
-# Запуск ASGI-сервера
 CMD ["sh", "-c", "uvicorn ${APP_MODULE} --host 0.0.0.0 --port ${PORT} --log-level info"]

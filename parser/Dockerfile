@@ -1,27 +1,32 @@
 FROM python:3.11-slim
 
-# Отключаем буферизацию вывода и создание .pyc файлов
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
 
-# 1. Кэшируем слой с зависимостями
-COPY requirements.txt .
+# Зависимости
+COPY parser/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 2. ПРЕДЗАГРУЗКА МОДЕЛИ (Самое важное изменение!)
-# Мы скачиваем 2.2 ГБ модель на этапе сборки (build), а не при старте контейнера.
-# Это навсегда запечет модель в образ Docker (образ станет весить ~3 ГБ, но запуск будет мгновенным).
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-large')"
+# Предзагрузка модели BGE-M3 в образ (~2.2 GB)
+# Модель запекается в образ, при старте контейнера не скачивается
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3')"
 
-# 3. Копируем скрипт
-COPY parser_and_index.py .
+# Общий пакет (копируется в оба образа: api и parser)
+COPY common/ ./common/
 
-# 4. Создаем пустую папку для резюме
-# Если ты не пробросишь volume, скрипт не упадет с ошибкой "No such file or directory", 
-# а просто скажет, что файлов 0.
+# Код парсера
+COPY parser/celery_app.py .
+COPY parser/tasks.py .
+COPY parser/parser_and_index.py .
+
+# Папка для резюме (при запуске перекрывается volume)
 RUN mkdir -p /app/resumes
 
-# Запуск
+# Непривилегированный пользователь
+RUN useradd -m appuser && chown -R appuser:appuser /app
+USER appuser
+
+# По умолчанию — CLI (переопределяется в compose для worker'а и CLI-профиля)
 CMD ["python", "parser_and_index.py"]

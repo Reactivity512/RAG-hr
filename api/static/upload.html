@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Загрузка резюме — AI Resume RAG</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+    <div class="container">
+        <header>
+            <div class="logo-icon">HR</div>
+            <div class="header-title">
+                <h1>Загрузка резюме</h1>
+                <p>Управление базой: загрузка, обработка, удаление</p>
+            </div>
+            <nav class="main-nav">
+                <a href="/">Чат</a>
+                <a href="/upload" class="active">Загрузка</a>
+            </nav>
+        </header>
+
+        <div class="upload-content">
+
+            <!-- ─── Drop-zone ─── -->
+            <div class="drop-zone" id="dropZone">
+                <h3>Перетащите .txt файл сюда</h3>
+                <p>или выберите вручную. Максимум 512 KB, кодировка UTF-8</p>
+                <button type="button" class="secondary" id="browseBtn">Выбрать файл</button>
+                <input type="file" id="fileInput" accept=".txt">
+                <div class="upload-messages" id="uploadMessages"></div>
+            </div>
+
+            <!-- ─── Задачи в обработке / ошибки ─── -->
+            <div class="section">
+                <h3>В обработке и ошибки <span class="count" id="tasksCount">0</span></h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Файл</th>
+                                <th>Статус</th>
+                                <th>Загружено</th>
+                                <th>Ошибка</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tasksBody">
+                            <tr class="empty-row"><td colspan="4">Загрузок пока не было</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ─── Готовые резюме ─── -->
+            <div class="section">
+                <h3>Готовые резюме <span class="count" id="resumesCount">0</span></h3>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Файл</th>
+                                <th>Специальность</th>
+                                <th>Навыки</th>
+                                <th>Проиндексировано</th>
+                                <th style="width: 130px;">Действия</th>
+                            </tr>
+                        </thead>
+                        <tbody id="resumesBody">
+                            <tr class="empty-row"><td colspan="5">Резюме пока не загружены</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- ─── Модальное окно просмотра ─── -->
+    <div class="modal-backdrop" id="modalBackdrop">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="modalTitle">Резюме</h3>
+                <button type="button" class="modal-close" id="modalClose">×</button>
+            </div>
+            <div class="modal-body" id="modalBody"></div>
+        </div>
+    </div>
+
+    <script>
+        // ─────────────────────────────────────────────────
+        // Утилиты
+        // ─────────────────────────────────────────────────
+
+        const fmtDate = (iso) => {
+            if (!iso) return '—';
+            try {
+                return new Date(iso).toLocaleString('ru-RU', {
+                    day: '2-digit', month: '2-digit', year: '2-digit',
+                    hour: '2-digit', minute: '2-digit'
+                });
+            } catch { return iso; }
+        };
+
+        const escapeHtml = (str) => {
+            if (str == null) return '';
+            return String(str)
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#39;');
+        };
+
+        const STATUS_LABELS = {
+            queued:     'В очереди',
+            processing: 'Обработка',
+            indexed:    'Готово',
+            failed:     'Ошибка'
+        };
+
+        // ─────────────────────────────────────────────────
+        // Загрузка файла
+        // ─────────────────────────────────────────────────
+
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const browseBtn = document.getElementById('browseBtn');
+        const uploadMessages = document.getElementById('uploadMessages');
+
+        browseBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            fileInput.click();
+        });
+
+        dropZone.addEventListener('click', () => fileInput.click());
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) {
+                handleFile(e.target.files[0]);
+                fileInput.value = '';  // сброс, чтобы повторный выбор того же файла сработал
+            }
+        });
+
+        ['dragenter', 'dragover'].forEach(evt => {
+            dropZone.addEventListener(evt, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dropZone.classList.add('dragover');
+            });
+        });
+
+        ['dragleave', 'drop'].forEach(evt => {
+            dropZone.addEventListener(evt, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dropZone.classList.remove('dragover');
+            });
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            const files = e.dataTransfer.files;
+            if (files.length) handleFile(files[0]);
+        });
+
+        function showMessage(text, kind = 'error') {
+            const el = document.createElement('div');
+            el.className = `upload-msg ${kind}`;
+            el.textContent = text;
+            uploadMessages.appendChild(el);
+            setTimeout(() => el.remove(), 6000);
+        }
+
+        async function handleFile(file) {
+            if (!file.name.toLowerCase().endsWith('.txt')) {
+                showMessage(`Файл "${file.name}" не .txt — пропущен`, 'error');
+                return;
+            }
+            if (file.size > 512 * 1024) {
+                showMessage(`Файл "${file.name}" больше 512 KB`, 'error');
+                return;
+            }
+
+            const fd = new FormData();
+            fd.append('file', file);
+
+            try {
+                const resp = await fetch('/api/resumes/upload', {
+                    method: 'POST',
+                    body: fd
+                });
+
+                if (!resp.ok) {
+                    let detail = `HTTP ${resp.status}`;
+                    try {
+                        const data = await resp.json();
+                        if (data.detail) detail = data.detail;
+                    } catch {}
+                    showMessage(`Ошибка загрузки "${file.name}": ${detail}`, 'error');
+                    return;
+                }
+
+                showMessage(`"${file.name}" загружен и поставлен в очередь`, 'success');
+                await refreshAll();
+            } catch (err) {
+                showMessage(`Сеть недоступна: ${err.message}`, 'error');
+            }
+        }
+
+        // ─────────────────────────────────────────────────
+        // Таблица «В обработке / Ошибки» (из /api/tasks)
+        // ─────────────────────────────────────────────────
+
+        const tasksBody = document.getElementById('tasksBody');
+        const tasksCount = document.getElementById('tasksCount');
+
+        async function refreshTasks() {
+            try {
+                const resp = await fetch('/api/tasks');
+                if (!resp.ok) return;
+                const data = await resp.json();
+                renderTasks(data.items || []);
+            } catch (err) {
+                console.error('tasks fetch:', err);
+            }
+        }
+
+        function renderTasks(items) {
+            tasksCount.textContent = items.length;
+
+            if (!items.length) {
+                tasksBody.innerHTML = `<tr class="empty-row"><td colspan="4">Загрузок пока не было</td></tr>`;
+                return;
+            }
+
+            tasksBody.innerHTML = items.map(t => `
+                <tr>
+                    <td>${escapeHtml(t.filename)}</td>
+                    <td><span class="badge ${t.status}">${STATUS_LABELS[t.status] || t.status}</span></td>
+                    <td>${fmtDate(t.uploaded_at)}</td>
+                    <td>${t.error ? `<span style="color: var(--danger-color);">${escapeHtml(t.error)}</span>` : '—'}</td>
+                </tr>
+            `).join('');
+        }
+
+        // ─────────────────────────────────────────────────
+        // Таблица «Готовые резюме» (из /api/resumes)
+        // ─────────────────────────────────────────────────
+
+        const resumesBody = document.getElementById('resumesBody');
+        const resumesCount = document.getElementById('resumesCount');
+
+        async function refreshResumes() {
+            try {
+                const resp = await fetch('/api/resumes');
+                if (!resp.ok) return;
+                const data = await resp.json();
+                renderResumes(data.items || []);
+            } catch (err) {
+                console.error('resumes fetch:', err);
+            }
+        }
+
+        function renderSkills(skills) {
+            if (!skills || !skills.length) return '—';
+            const visible = skills.slice(0, 3);
+            const restCount = skills.length - visible.length;
+
+            const visibleHtml = visible.map(s => `<span class="skill-tag">${escapeHtml(s)}</span>`).join('');
+
+            if (restCount <= 0) {
+                return `<div class="skills-cell">${visibleHtml}</div>`;
+            }
+
+            // Все навыки спрятаны в data-атрибуте, toggle раскрывает
+            const allHtml = skills.map(s => `<span class="skill-tag">${escapeHtml(s)}</span>`).join('');
+            return `
+                <div class="skills-cell">
+                    ${visibleHtml}
+                    <button type="button" class="skills-toggle"
+                            data-full='${escapeHtml(JSON.stringify(skills))}'
+                            data-expanded="0"
+                            onclick="toggleSkills(this)">
+                        +${restCount}
+                    </button>
+                </div>
+                <div class="skills-cell skills-full" style="display:none;">${allHtml}</div>
+            `;
+        }
+
+        window.toggleSkills = function (btn) {
+            const expanded = btn.getAttribute('data-expanded') === '1';
+            const wrapper = btn.closest('.skills-cell');
+            const fullBlock = wrapper.nextElementSibling;
+
+            if (expanded) {
+                btn.setAttribute('data-expanded', '0');
+                btn.textContent = `+${JSON.parse(btn.getAttribute('data-full')).length - 3}`;
+                fullBlock.style.display = 'none';
+            } else {
+                btn.setAttribute('data-expanded', '1');
+                btn.textContent = 'свернуть';
+                fullBlock.style.display = 'flex';
+            }
+        };
+
+        function renderResumes(items) {
+            resumesCount.textContent = items.length;
+
+            if (!items.length) {
+                resumesBody.innerHTML = `<tr class="empty-row"><td colspan="5">Резюме пока не загружены</td></tr>`;
+                return;
+            }
+
+            resumesBody.innerHTML = items.map(r => `
+                <tr>
+                    <td>${escapeHtml(r.file_name)}</td>
+                    <td>${escapeHtml(r.title || '—')}</td>
+                    <td>${renderSkills(r.skills_list)}</td>
+                    <td>${fmtDate(r.indexed_at)}</td>
+                    <td>
+                        <button type="button" class="secondary small" onclick="openResume('${r.id}')">Открыть</button>
+                        <button type="button" class="danger small" onclick="deleteResume('${r.id}', '${escapeHtml(r.file_name)}')">Удалить</button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        // ─────────────────────────────────────────────────
+        // Модальное окно
+        // ─────────────────────────────────────────────────
+
+        const modalBackdrop = document.getElementById('modalBackdrop');
+        const modalTitle = document.getElementById('modalTitle');
+        const modalBody = document.getElementById('modalBody');
+        const modalClose = document.getElementById('modalClose');
+
+        modalClose.addEventListener('click', closeModal);
+        modalBackdrop.addEventListener('click', (e) => {
+            if (e.target === modalBackdrop) closeModal();
+        });
+
+        function closeModal() {
+            modalBackdrop.classList.remove('open');
+        }
+
+        window.openResume = async function (id) {
+            try {
+                const resp = await fetch(`/api/resumes/${id}`);
+                if (!resp.ok) {
+                    alert(`Не удалось открыть: HTTP ${resp.status}`);
+                    return;
+                }
+                const r = await resp.json();
+
+                modalTitle.textContent = r.file_name || 'Резюме';
+                modalBody.innerHTML = `
+                    <div class="field"><div class="field-label">Специальность</div><div class="field-value">${escapeHtml(r.title || '—')}</div></div>
+                    <div class="field"><div class="field-label">Зарплата</div><div class="field-value">${escapeHtml(r.salary || '—')}</div></div>
+                    <div class="field"><div class="field-label">Формат работы</div><div class="field-value">${escapeHtml(r.format || '—')}</div></div>
+                    <div class="field"><div class="field-label">Контакты</div><div class="field-value">${escapeHtml(r.contacts || '—')}</div></div>
+                    <div class="field"><div class="field-label">Навыки</div><div class="field-value">${escapeHtml((r.skills_list || []).join(', ') || '—')}</div></div>
+                    <div class="field"><div class="field-label">Опыт работы</div><div class="field-value">${escapeHtml(r.experience_text || '—')}</div></div>
+                    <div class="field"><div class="field-label">Образование</div><div class="field-value">${escapeHtml(r.education || '—')}</div></div>
+                    <div class="field"><div class="field-label">О себе</div><div class="field-value">${escapeHtml(r.about || '—')}</div></div>
+                    <div class="field">
+                        <div class="field-label">Полный текст</div>
+                        <pre class="full-text">${escapeHtml(r.full_text || '')}</pre>
+                    </div>
+                `;
+                modalBackdrop.classList.add('open');
+            } catch (err) {
+                alert(`Ошибка: ${err.message}`);
+            }
+        };
+
+        // ─────────────────────────────────────────────────
+        // Удаление
+        // ─────────────────────────────────────────────────
+
+        window.deleteResume = async function (id, fileName) {
+            if (!confirm(`Удалить резюме "${fileName}"?\n\nЭто действие удалит файл, вектор в Qdrant и запись в Redis.`)) {
+                return;
+            }
+            try {
+                const resp = await fetch(`/api/resumes/${id}`, { method: 'DELETE' });
+                if (!resp.ok && resp.status !== 204) {
+                    alert(`Не удалось удалить: HTTP ${resp.status}`);
+                    return;
+                }
+                showMessage(`"${fileName}" удалено`, 'success');
+                await refreshAll();
+            } catch (err) {
+                alert(`Ошибка: ${err.message}`);
+            }
+        };
+
+        // ─────────────────────────────────────────────────
+        // Polling и общий refresh
+        // ─────────────────────────────────────────────────
+
+        const POLL_INTERVAL_MS = 10_000;
+
+        async function refreshAll() {
+            await Promise.all([refreshTasks(), refreshResumes()]);
+        }
+
+        // Первичная загрузка + периодический polling
+        refreshAll();
+        setInterval(refreshAll, POLL_INTERVAL_MS);
+
+        // Escape закрывает модалку
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeModal();
+        });
+    </script>
+</body>
+</html>

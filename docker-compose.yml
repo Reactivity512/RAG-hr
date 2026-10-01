@@ -1,4 +1,7 @@
 services:
+  # ─────────────────────────────────────────────
+  # Инфраструктура
+  # ─────────────────────────────────────────────
   qdrant:
     image: qdrant/qdrant:latest
     container_name: qdrant-hr
@@ -13,39 +16,177 @@ services:
       - ml-net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/6333' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis-hr
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    networks:
+      - ml-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
 
+  # ─────────────────────────────────────────────
+  # API (FastAPI) — chat, upload, list, delete, tasks
+  # ─────────────────────────────────────────────
   api:
-    build: ./api
+    build:
+      context: .
+      dockerfile: api/Dockerfile
     container_name: rag-api-hr
     ports:
       - "8000:8000"
     environment:
       QDRANT_HOST: qdrant
-      OLLAMA_HOST: http://host.docker.internal:11434
-      OLLAMA_MODEL: llama3
-    networks:
-      - ml-net
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      RESUMES_DIR: /app/resumes
+      # Дефолт — локальный Ollama на хосте (см. .env.example)
+      LLM_BACKEND_URL: ${LLM_BACKEND_URL:-http://host.docker.internal:11434/v1}
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5:4b}
+    volumes:
+      - ./resumes:/app/resumes
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ml-net
     restart: unless-stopped
 
-  parser:
-    build: ./parser
-    container_name: rag-parser-hr
+  # ─────────────────────────────────────────────
+  # Parser (Celery worker) — обрабатывает загрузки из UI
+  # Пишет статусы в Redis, индексирует в Qdrant
+  # ─────────────────────────────────────────────
+  parser-worker:
+    build:
+      context: .
+      dockerfile: parser/Dockerfile
+    container_name: rag-parser-worker-hr
+    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=1"]
     environment:
       QDRANT_HOST: qdrant
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      RESUMES_DIR: /app/resumes
+    volumes:
+      - ./resumes:/app/resumes
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - ml-net
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Parser CLI — ручная переиндексация всех резюме
+  # Запуск: docker compose --profile manual up parser-cli
+  # ─────────────────────────────────────────────
+  parser-cli:
+    build:
+      context: .
+      dockerfile: parser/Dockerfile
+    container_name: rag-parser-cli-hr
+    command: ["python", "parser_and_index.py"]
+    environment:
+      QDRANT_HOST: qdrant
+      RESUMES_DIR: /app/resumes
     volumes:
-      - ./resumes:/app/resumes 
-    profiles: ["manual"]  
+      - ./resumes:/app/resumes
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    networks:
+      - ml-net
+    profiles: ["manual"]
+
+  # ─────────────────────────────────────────────
+  # ПРОФИЛЬ: Ollama в Docker (CPU-only)
+  # Запуск: docker compose --profile ollama-docker up -d
+  # В .env: LLM_BACKEND_URL=http://ollama:11434/v1
+  # ─────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama-hr
+    profiles: ["ollama-docker"]
+    ports:
+      - "11434:11434"
+    environment:
+      OLLAMA_HOST: 0.0.0.0
+      OLLAMA_KEEP_ALIVE: 15m
+      OLLAMA_NUM_PARALLEL: 1
+      OLLAMA_CONTEXT_LENGTH: 8192
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - ml-net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # ПРОФИЛЬ: vLLM (GPU ≥ compute 7.0, ≥ 8GB VRAM)
+  # Запуск: docker compose --profile vllm up -d
+  # В .env: LLM_BACKEND_URL=http://vllm:8000/v1
+  #         LLM_MODEL=Qwen/Qwen2.5-7B-Instruct-AWQ
+  # ─────────────────────────────────────────────
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-hr
+    profiles: ["vllm"]
+    command: >
+      --model Qwen/Qwen2.5-7B-Instruct-AWQ
+      --quantization awq
+      --dtype float16
+      --max-model-len 8192
+      --gpu-memory-utilization 0.9
+      --port 8000
+      --host 0.0.0.0
+    ports:
+      - "8001:8000"
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    shm_size: "8gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - ml-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/models >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 8
+      start_period: 1200s
+    restart: unless-stopped
 
 networks:
   ml-net:
     driver: bridge
+
+volumes:
+  redis_data:
+  ollama_data:
+  hf_cache:

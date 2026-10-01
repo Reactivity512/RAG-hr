@@ -1,2 +1,5 @@
 qdrant-client
-sentence_transformers
+sentence-transformers
+celery
+redis
+pydantic>=2.0
