@@ -1,0 +1,8 @@
+spring:
+  application:
+    name: rag-hr
+
+logging:
+  level:
+    root: INFO
+    com.github.reactivity512.rag: INFO

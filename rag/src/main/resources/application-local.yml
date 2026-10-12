@@ -1,0 +1,18 @@
+# Локальный запуск без Docker: пути и адреса для машины разработчика.
+#
+# Использование:
+#   java -jar rag-hr.jar --spring.profiles.active=api,local
+#   java -jar rag-hr.jar --spring.profiles.active=worker,local
+#
+# В Docker этот профиль не нужен: адреса и каталоги задаются в compose.
+rag:
+  storage:
+    # Каталог с резюме относительно корня репозитория
+    resumes-dir: ../resumes
+  qdrant:
+    host: localhost
+    port: 6334
+  embedding:
+    base-url: http://localhost:11434
+  queue:
+    enabled: false

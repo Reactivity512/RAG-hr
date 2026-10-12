@@ -40,24 +40,27 @@ services:
       retries: 5
 
   # ─────────────────────────────────────────────
-  # API (FastAPI) — chat, upload, list, delete, tasks
+  # API (Spring Boot, профиль api) — чат, загрузка, список, статусы
   # ─────────────────────────────────────────────
-  api:
+  rag-api:
     build:
       context: .
-      dockerfile: api/Dockerfile
+      dockerfile: rag/Dockerfile
+    image: rag-hr:latest
     container_name: rag-api-hr
     ports:
       - "8000:8000"
     environment:
-      QDRANT_HOST: qdrant
       REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      QDRANT_HOST: qdrant
+      QDRANT_GRPC_PORT: 6334
       RESUMES_DIR: /app/resumes
-      # Дефолт — локальный Ollama на хосте (см. .env.example)
+      # По умолчанию — локальный Ollama на хосте; см. .env.example
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       LLM_BACKEND_URL: ${LLM_BACKEND_URL:-http://host.docker.internal:11434/v1}
-      LLM_MODEL: ${LLM_MODEL:-qwen2.5:4b}
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5:1.5b}
+      LLM_API_KEY: ${LLM_API_KEY:-not-needed}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
     volumes:
       - ./resumes:/app/resumes
     extra_hosts:
@@ -72,23 +75,37 @@ services:
     restart: unless-stopped
 
   # ─────────────────────────────────────────────
-  # Parser (Celery worker) — обрабатывает загрузки из UI
-  # Пишет статусы в Redis, индексирует в Qdrant
+  # Worker (Spring Boot, профиль worker) — Redis Streams:
+  # извлечение текста → разбор → эмбеддинг → Qdrant
   # ─────────────────────────────────────────────
-  parser-worker:
+  rag-worker:
     build:
       context: .
-      dockerfile: parser/Dockerfile
-    container_name: rag-parser-worker-hr
-    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info", "--concurrency=1"]
+      dockerfile: rag/Dockerfile
+    image: rag-hr:latest
+    container_name: rag-worker-hr
+    entrypoint:
+      - sh
+      - -c
+      - exec java $JAVA_OPTS -jar /app/rag-hr.jar --spring.profiles.active=worker
+    # У воркера нет порта: живость проверяется по наличию процесса
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f rag-hr.jar >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     environment:
-      QDRANT_HOST: qdrant
       REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      QDRANT_HOST: qdrant
+      QDRANT_GRPC_PORT: 6334
       RESUMES_DIR: /app/resumes
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
     volumes:
       - ./resumes:/app/resumes
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       qdrant:
         condition: service_healthy
@@ -99,31 +116,10 @@ services:
     restart: unless-stopped
 
   # ─────────────────────────────────────────────
-  # Parser CLI — ручная переиндексация всех резюме
-  # Запуск: docker compose --profile manual up parser-cli
-  # ─────────────────────────────────────────────
-  parser-cli:
-    build:
-      context: .
-      dockerfile: parser/Dockerfile
-    container_name: rag-parser-cli-hr
-    command: ["python", "parser_and_index.py"]
-    environment:
-      QDRANT_HOST: qdrant
-      RESUMES_DIR: /app/resumes
-    volumes:
-      - ./resumes:/app/resumes
-    depends_on:
-      qdrant:
-        condition: service_healthy
-    networks:
-      - ml-net
-    profiles: ["manual"]
-
-  # ─────────────────────────────────────────────
   # ПРОФИЛЬ: Ollama в Docker (CPU-only)
   # Запуск: docker compose --profile ollama-docker up -d
-  # В .env: LLM_BACKEND_URL=http://ollama:11434/v1
+  # В .env: OLLAMA_BASE_URL=http://ollama:11434
+  #         LLM_BACKEND_URL=http://ollama:11434/v1
   # ─────────────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
@@ -135,6 +131,8 @@ services:
       OLLAMA_HOST: 0.0.0.0
       OLLAMA_KEEP_ALIVE: 15m
       OLLAMA_NUM_PARALLEL: 1
+      # Контекст 8192: Ollama молча обрезает вход по этому значению,
+      # а резюме длиннее дефолтных 2048 токенов
       OLLAMA_CONTEXT_LENGTH: 8192
     volumes:
       - ollama_data:/root/.ollama
