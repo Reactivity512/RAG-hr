@@ -1,9 +1,0 @@
-fastapi
-uvicorn
-python-multipart
-qdrant-client
-sentence-transformers
-openai
-celery
-redis
-pydantic>=2.0

@@ -1,0 +1,63 @@
+# Профиль api: REST, статика, постановка задач в очередь.
+server:
+  port: 8000
+  # Ограничение размера загрузки: совпадает с проверкой в контроллере
+  tomcat:
+    max-http-form-post-size: 1MB
+  servlet:
+    multipart:
+      max-file-size: 1MB
+      max-request-size: 2MB
+
+spring:
+  data:
+    redis:
+      url: ${REDIS_URL:redis://localhost:6379/0}
+  ai:
+    # Чат через OpenAI-совместимый API: работает и с Ollama (/v1), и с vLLM
+    openai:
+      base-url: ${LLM_BACKEND_URL:http://localhost:11434/v1}
+      api-key: ${LLM_API_KEY:not-needed}
+      chat:
+        options:
+          model: ${LLM_MODEL:qwen2.5:1.5b}
+          temperature: 0.1
+      embedding:
+        # Эмбеддинги считает собственный клиент Ollama, а не этот стартер
+        enabled: false
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      embedding:
+        # Отключаем авто-конфигурацию: используется собственный OllamaEmbeddingModel
+        enabled: false
+      chat:
+        enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+rag:
+  storage:
+    resumes-dir: ${RESUMES_DIR:./resumes}
+    max-upload-bytes: 524288
+  qdrant:
+    host: ${QDRANT_HOST:localhost}
+    port: ${QDRANT_GRPC_PORT:6334}
+    collection: ${QDRANT_COLLECTION:resumes}
+    vector-size: 1024
+  embedding:
+    base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+    model: ${EMBEDDING_MODEL:bge-m3}
+  llm:
+    # openai — через OpenAI-совместимый /v1 (работает и с Ollama, и с vLLM);
+    # ollama — через нативный API Ollama
+    backend: ${LLM_BACKEND:openai}
+  queue:
+    # API только ставит задачи, воркер их не разбирает
+    enabled: false

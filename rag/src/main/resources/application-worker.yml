@@ -1,0 +1,56 @@
+# Профиль worker: разбор очереди, парсинг, эмбеддинг, запись в Qdrant.
+# Web-сервер не поднимается (см. RagWorkerApplication).
+spring:
+  main:
+    web-application-type: none
+  data:
+    redis:
+      url: ${REDIS_URL:redis://localhost:6379/0}
+      # Jedis: воркер выполняет блокирующее чтение из Redis Stream
+      client-type: jedis
+  ai:
+    # Воркеру нужны только эмбеддинги: отключаем все остальные модели,
+    # иначе стартер OpenAI пытается создать бины аудио/изображений и требует ключ
+    model:
+      chat: none
+      embedding: none
+      image: none
+      moderation: none
+      audio:
+        speech: none
+        transcription: none
+    openai:
+      chat:
+        enabled: false
+      embedding:
+        enabled: false
+      image:
+        enabled: false
+      moderation:
+        enabled: false
+      audio:
+        speech:
+          enabled: false
+        transcription:
+          enabled: false
+    ollama:
+      chat:
+        enabled: false
+      embedding:
+        enabled: false
+
+rag:
+  storage:
+    resumes-dir: ${RESUMES_DIR:./resumes}
+    max-upload-bytes: 524288
+  qdrant:
+    host: ${QDRANT_HOST:localhost}
+    port: ${QDRANT_GRPC_PORT:6334}
+    collection: ${QDRANT_COLLECTION:resumes}
+    vector-size: 1024
+  embedding:
+    base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+    model: ${EMBEDDING_MODEL:bge-m3}
+  queue:
+    # Здесь задачи разбираются
+    enabled: true

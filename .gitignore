@@ -3,3 +3,5 @@ venv/
 .venv/
 .dockerignore
 qdrant_storage/
+target/
+*.class
